@@ -206,8 +206,6 @@ DT2 = [table(cas_waves(:,1,i),cas_waves(:,2,i),cas_waves(:,3,i),cas_waves(:,4,i)
 
 M2=fitlm(DT2)
 
-
-
 %% Estimate excess deaths from full model, all ages and both sexes (M1 above)
 % Estimate "COVID deaths" in model with a single COVID regressor
 M0=dat(ol_idx).M0;
@@ -304,3 +302,123 @@ grid('on')
 (max(smooth(Y))-min(smooth(Y)))/(max(smooth(X(:,2))-min(smooth(X(1,2)))))
 
 (max(Y)-min(Y))/(max(X(:,2)-X(1,2)))
+
+%% Create table of vaccine coefficients by age and lag
+% Lag vaccine term from 0-10 weeks
+vlags=[0:10]; 
+% index of the optimum lag for COVID cases (4 days)
+i=ol_idx; 
+clear clms hacs
+
+% In addition to OLS, we will estimate heteroscedasticity and 
+% autocorrelation consistent Newey-West covariance matrices as outlined 
+% here: https://www.mathworks.com/help/econ/hac.html#btrsadq-2
+
+% Compute maxlag bandwith as in [2] Andrews, D. W. K., and J. C. Monohan.
+% "An Improved Heteroskedasticity and Autocorrelation Consistent 
+% Covariance Matrix Estimator." Econometrica. Vol. 60, 1992, pp. 953–966.
+% as cited in https://www.mathworks.com/help/econ/hac.html#btrsadq-2
+T=height(DT);
+maxLag = floor(4*(T/100)^(2/9));
+
+% initialize array of vaccine coefficients and standard errors
+clms.coeff=zeros(length(ages),length(vlags)); 
+clms.se=zeros(length(ages),length(vlags));
+hacs.coeff=zeros(length(ages),length(vlags)); 
+hacs.se=zeros(length(ages),length(vlags));
+
+% initialize column of table labels for age
+for v=1:length(vlags)
+    for a=1:length(ages)
+        disp(['Working on lag: ' int2str(v) ', age ' int2str(a)])
+        vax_lag=lagmatrix(vax_counts(:,1),vlags(v));
+        dos_labels={'w1','w2','w3','w4','w5','w6','w7','w8','doses','EM'};
+        DT = [table(cas_waves(:,1,i),cas_waves(:,2,i),cas_waves(:,3,i),cas_waves(:,4,i),...
+            cas_waves(:,5,i),cas_waves(:,6,i),cas_waves(:,7,i),cas_waves(:,8,i),vax_lag,EM(:,a,1),...
+            'VariableNames',dos_labels)]; % Table
+        M=fitlm(DT);
+        [EstCoeffCov,se,coeff]=hac(DT,'Bandwidth',maxLag+1);
+        hacs.se(a,v)=se(end); hacs.coeff(a,v)=coeff(end);
+        clms.coeff(a,v)=M.Coefficients.Estimate(end);
+        clms.se(a,v)=M.Coefficients.SE(end);
+        clm_tmp=[num2str(clms.coeff(a,v),'%0.1d') ' (' num2str(clms.se(a,v),'%0.1d') ')'];
+        hac_tmp=[num2str(hacs.coeff(a,v),'%0.1d') ' (' num2str(hacs.se(a,v),'%0.1d') ')'];
+        clms.tab{a,v}=clm_tmp;
+        hacs.tab{a,v}=hac_tmp;
+    end
+end
+
+for v=1:length(vlags)
+    for a=1:length(ages)
+        clms.tval(a,v)=clms.coeff(a,v)/clms.se(a,v);
+        clms.pval(a,v)=2*(1-tcdf(abs(clms.tval(a,v)),147));
+        clm_tmp=[num2str(clms.tval(a,v),'%0.2f') ' (' num2str(clms.pval(a,v),'%0.4f') ')'];
+        clms2.tab{a,v}=clm_tmp;
+        
+        hacs.tval(a,v)=hacs.coeff(a,v)/hacs.se(a,v);
+        hacs.pval(a,v)=2*(1-tcdf(abs(hacs.tval(a,v)),147));
+        hac_tmp=[num2str(hacs.tval(a,v),'%0.2f') ' (' num2str(hacs.pval(a,v),'%0.4f') ')'];
+        hacs2.tab{a,v}=hac_tmp;
+    end
+end
+       
+clms_tab=cell2table([ages clms2.tab],'VariableNames',{'Age','L0: tval (pval)','L1: tval (pval)','L2: tval (pval)',...
+    'L3: tval (pval)','L4: tval (pval)','L5: tval (pval)','L6: tval (pval)','L7: tval (pval)','L8: tval (pval)',...
+    'L9: tval (pval)','L10: tval (pval)'})
+
+hacs_tab=cell2table([ages hacs2.tab],'VariableNames',{'Age','L0: tval (pval)','L1: tval (pval)','L2: tval (pval)',...
+    'L3: tval (pval)','L4: tval (pval)','L5: tval (pval)','L6: tval (pval)','L7: tval (pval)','L8: tval (pval)',...
+    'L9: tval (pval)','L10: tval (pval)'})
+
+writetable(clms_tab,'CLM_Table.csv')
+writetable(hacs_tab,'HAC_BW5_Table.csv')
+
+[h crit_p hacs.adj_p]=fdr_bh(hacs.pval,0.05,'pdep');
+[h crit_p clms.adj_p]=fdr_bh(clms.pval,0.05,'pdep');
+
+% Write out HAC table with terms suriving p<0.05 FDR corrected 
+for v=1:length(vlags)
+    for a=1:length(ages)
+        if hacs.adj_p(a,v) > 0.05
+            hacs_tab(a,v+1)={'ns'};
+        end
+        if clms.adj_p(a,v) > 0.05
+            clms_tab(a,v+1)={'ns'};
+        end
+    end
+end
+
+writetable(hacs_tab,'HAC_BW5_ADJ_Table.csv')
+writetable(clms_tab,'CLM_ADJ_Table.csv')   
+
+%% Plot residuals 
+close_figures
+DT = [table(cas_waves(:,1,i),cas_waves(:,2,i),cas_waves(:,3,i),cas_waves(:,4,i),...
+    cas_waves(:,5,i),cas_waves(:,6,i),cas_waves(:,7,i),cas_waves(:,8,i),vax_counts(:,1),EM(:,17,1),...
+    'VariableNames',dos_labels)]; % Table
+M=fitlm(DT);
+
+plotResiduals(M,"fitted")
+
+tiledlayout(2,1)
+nexttile
+plotResiduals(M,"caseorder")
+nexttile
+plotResiduals(M,"lagged")
+
+%% Write out data tables
+dos_labels={'w1','w2','w3','w4','w5','w6','w7','w8','doses','EM'};
+mkdir('Tables')
+cd('./Tables')
+for a=1:length(ages)
+    
+    DT = [table(cas_waves(:,1,i),cas_waves(:,2,i),cas_waves(:,3,i),cas_waves(:,4,i),...
+    cas_waves(:,5,i),cas_waves(:,6,i),cas_waves(:,7,i),cas_waves(:,8,i),vax_counts(:,1),EM(:,a,1),...
+    'VariableNames',dos_labels)]; % Table
+    writetable(DT,['ages_' strrep(ages{a},' ','-') '-Data.csv']) 
+end
+cd('../')
+
+
+
+        
